@@ -1,0 +1,163 @@
+#include <TinyGPS++.h>
+#include <SoftwareSerial.h>
+#include <Wire.h>
+#include <Adafruit_MLX90614.h>
+#include <LoRa.h>
+#include <ArduinoJson.h>
+
+#define rxGPS 1
+#define txGPS 0
+#define heartRatePin 26
+#define csPin 17
+#define resetPin 4
+#define frequency 433E6
+
+long lat, lon;
+SoftwareSerial gpsSerial(rxGPS, txGPS);
+TinyGPSPlus gps;
+Adafruit_MLX90614 mlx;
+
+const char* devID = "Psiborg_123";
+
+volatile unsigned int pulseCount = 0;
+volatile boolean pulseDetected = false;
+unsigned long lastPulseTime = 0;
+const unsigned long debounceInterval = 750;
+
+void handlePulse() {
+  unsigned long currentTime = millis();
+  if (currentTime - lastPulseTime > debounceInterval) {
+    pulseCount++;
+    pulseDetected = true;
+    lastPulseTime = currentTime;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(5000);
+  Wire.setSDA(20);
+  Wire.setSCL(21);
+  Wire.begin();
+
+  if (!mlx.begin()) {
+    Serial.println("Error connecting to MLX sensor. Check wiring.");
+    while (1);
+  }
+
+  pinMode(heartRatePin, INPUT);
+  attachInterrupt(digitalPinToInterrupt(heartRatePin), handlePulse, RISING);
+
+  LoRa.setPins(csPin, resetPin);
+  LoRa.setTxPower(20);
+  LoRa.setSpreadingFactor(12);
+  LoRa.setSignalBandwidth(125E3);
+  LoRa.setCodingRate4(5);
+
+  if (!LoRa.begin(frequency)) {
+    Serial.println("LoRa init failed. Check your connections.");
+    while (true); 
+  }
+
+  Serial.println("LoRa init succeeded.");
+  Serial.println();
+  Serial.println("LoRa Simple Node");
+  Serial.println("Transmitter side");
+  Serial.println("Tx: invertIQ disable");
+  Serial.println("Rx: invertIQ enable");
+  Serial.println();
+}
+
+void loop() {
+  sendGPSData();
+  sendMLX90614Data();
+  sendHeartRateData();
+  delay(60000); 
+}
+
+void sendGPSData() {
+  StaticJsonDocument<200> jsonDocument;
+  jsonDocument["DEV_ID"] = devID;
+  jsonDocument["Sensor"] = "GPS";
+
+  if (gps.satellites.value() > 0) {
+    jsonDocument["gps_signal"] = "available";
+    jsonDocument["Latitude"] = gps.location.lat();
+    jsonDocument["Longitude"] = gps.location.lng();
+  } else {
+    jsonDocument["gps_signal"] = "lost";
+    jsonDocument["Latitude"] = 0.0;
+    jsonDocument["Longitude"] = 0.0;
+  }
+
+  String jsonString;
+  serializeJson(jsonDocument, jsonString);
+
+  LoRa.beginPacket();
+  LoRa.print(jsonString);
+  LoRa.endPacket();
+
+  Serial.println("JSON data sent for GPS: " + jsonString);
+}
+
+
+void sendMLX90614Data() {
+  float ambienttempinC = mlx.readAmbientTempC();
+  float objecttempinC = mlx.readObjectTempC();
+  float ambienttempinF = mlx.readAmbientTempF();
+  float objecttempinF = mlx.readObjectTempF();
+
+  Serial.print("Ambient Temp in C: ");
+  Serial.print(ambienttempinC);
+  Serial.print("  Object Temp in C: ");
+  Serial.print(objecttempinC);
+  Serial.print("  Ambient Temp in F: ");
+  Serial.print(ambienttempinF);
+  Serial.print("  Object Temp in F: ");
+  Serial.print(objecttempinF);
+
+  StaticJsonDocument<200> jsonDocument;
+  jsonDocument["Dev_ID"] = devID;
+  jsonDocument["Sensor"] = "MLX90614";
+  jsonDocument["ambient_temp_C"] = ambienttempinC;
+  jsonDocument["object_temp_C"] = objecttempinC;
+  jsonDocument["ambient_temp_F"] = ambienttempinF;
+  jsonDocument["object_temp_F"] = objecttempinF;
+
+  String jsonString;
+  serializeJson(jsonDocument, jsonString);
+
+  LoRa.beginPacket();
+  LoRa.print(jsonString);
+  LoRa.endPacket();
+
+  Serial.println("JSON data sent for MLX90614: " + jsonString);
+}
+
+void sendHeartRateData() {
+  detachInterrupt(digitalPinToInterrupt(heartRatePin));
+  unsigned int pulseCountCopy = pulseCount;
+  pulseCount = 0;
+  attachInterrupt(digitalPinToInterrupt(heartRatePin), handlePulse, RISING);
+
+  Serial.print("  Pulses per minute: ");
+  Serial.println(pulseCountCopy);
+
+  StaticJsonDocument<200> jsonDocument;
+  jsonDocument["Dev_ID"] = devID;
+  jsonDocument["Sensor"] = "HeartRate";
+  jsonDocument["Pulse"] = pulseCountCopy;
+
+  String jsonString;
+  serializeJson(jsonDocument, jsonString);
+
+  LoRa.beginPacket();
+  LoRa.print(jsonString);
+  LoRa.endPacket();
+
+  Serial.println("JSON data sent for HeartRate: " + jsonString);
+}
+
+
+
+
